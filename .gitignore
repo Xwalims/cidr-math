@@ -1,0 +1,21 @@
+node_modules/
+coverage/
+
+# npm
+npm-debug.log*
+.npm
+*.tgz
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# test and tooling output
+.nyc_output/
+*.log
+.DS_Store
+Thumbs.db
+
+# editors
+.idea/
+.vscode/
+*.swp

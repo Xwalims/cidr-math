@@ -1,0 +1,36 @@
+{
+  "name": "cidr-math",
+  "version": "0.1.0",
+  "description": "Dependency-free IP subnet arithmetic for IPv4 and IPv6: split, summarise, intersect, contain and difference with exact BigInt counts.",
+  "type": "commonjs",
+  "main": "src/index.js",
+  "bin": {
+    "cidr": "bin/cidr.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "keywords": [
+    "cidr",
+    "subnet",
+    "ipv4",
+    "ipv6",
+    "network",
+    "bigint",
+    "summarise",
+    "intersect",
+    "cli"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "private": false,
+  "dependencies": {}
+}
