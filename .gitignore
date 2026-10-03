@@ -15,6 +15,10 @@ pnpm-lock.yaml
 .DS_Store
 Thumbs.db
 
+# python bytecode (scripts/crosscheck.py is a development tool run from source)
+__pycache__/
+*.py[cod]
+
 # editors
 .idea/
 .vscode/
