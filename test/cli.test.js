@@ -347,3 +347,66 @@ test('a zone identifier is accepted and preserved', () => {
   assert.equal(result.status, 0);
   assert.equal(JSON.parse(result.stdout).zone, 'eth0');
 });
+
+// RFC 3021: a /31 keeps both of its addresses (a point-to-point link) and a /32
+// keeps its single one. The general rule (drop base and last) would print an
+// empty range for both, so these pin the two special cases in usableRange().
+test('info on a /31 keeps both addresses rather than dropping the endpoints', () => {
+  const result = run(['info', '192.168.1.0/31', '--json']);
+  assert.equal(result.status, 0);
+  const data = JSON.parse(result.stdout);
+  assert.equal(data.usableKind, 'point-to-point');
+  assert.equal(data.usableFirst, '192.168.1.0');
+  assert.equal(data.usableLast, '192.168.1.1');
+  assert.equal(data.usableCount, '2');
+});
+
+test('info on a /32 keeps its single address rather than dropping it', () => {
+  const result = run(['info', '192.168.1.7/32', '--json']);
+  assert.equal(result.status, 0);
+  const data = JSON.parse(result.stdout);
+  assert.equal(data.usableKind, 'single');
+  assert.equal(data.usableFirst, '192.168.1.7');
+  assert.equal(data.usableLast, '192.168.1.7');
+  assert.equal(data.usableCount, '1');
+});
+
+test('info on an IPv6 /127 keeps both addresses, like the IPv4 /31', () => {
+  const result = run(['info', '2001:db8::/127', '--json']);
+  assert.equal(result.status, 0);
+  const data = JSON.parse(result.stdout);
+  assert.equal(data.usableKind, 'point-to-point');
+  assert.equal(data.usableCount, '2');
+});
+
+test('info on the IPv6 /128 host route keeps its single address', () => {
+  const result = run(['info', '::1/128', '--json']);
+  assert.equal(result.status, 0);
+  const data = JSON.parse(result.stdout);
+  assert.equal(data.usableKind, 'single');
+  assert.equal(data.usableCount, '1');
+});
+
+test('a /31 is printed with its whole range in the text output too', () => {
+  const result = run(['info', '192.168.1.0/31']);
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /usable range:\s+192\.168\.1\.0 - 192\.168\.1\.1/);
+  assert.match(result.stdout, /usable count:\s+2 addresses/);
+});
+
+test('a /32 counts one usable address in the singular', () => {
+  const result = run(['info', '192.168.1.7/32']);
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /usable count:\s+1 address$/m);
+  assert.doesNotMatch(result.stdout, /1 addresses/);
+});
+
+test('the usual rule still drops base and last for a /30', () => {
+  const result = run(['info', '10.0.0.0/30', '--json']);
+  assert.equal(result.status, 0);
+  const data = JSON.parse(result.stdout);
+  assert.equal(data.usableKind, 'first-last');
+  assert.equal(data.usableFirst, '10.0.0.1');
+  assert.equal(data.usableLast, '10.0.0.2');
+  assert.equal(data.usableCount, '2');
+});

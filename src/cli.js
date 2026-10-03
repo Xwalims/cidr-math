@@ -58,9 +58,14 @@ Usage:
 
 Flags:
   --json                 Machine-readable output
-  --no-color             Never emit ANSI colour
+  --no-color, --no-colour   Never emit ANSI colour
+  --color, --colour         Force ANSI colour even when output is piped
   --expand               Also print every address in each block
   --expand-limit <n>     Refuse to expand more than <n> addresses (default ${DEFAULTS.expandLimit})
+  --new-prefix <n>       New prefix length for "split" (alternative to the
+                         positional argument)
+  --prefix <n>           Prefix length for "supernet" (alternative to the
+                         positional argument)
   -h, --help             Show this help
   -v, --version          Show the version
 
@@ -202,12 +207,14 @@ function renderInfo(net, input, options) {
   }
   const colour = palette(options.color);
   const data = netToJson(net, input);
+  // A /32 has exactly one usable address, so "addresses" would be wrong.
+  const usableCount = BigInt(data.usableCount);
   const rows = [
     ['network', data.network],
     ['first', data.first],
     ['last', data.last],
     ['usable range', `${data.usableFirst} - ${data.usableLast}`],
-    ['usable count', `${data.usableCount} addresses`],
+    ['usable count', `${data.usableCount} ${usableCount === 1n ? 'address' : 'addresses'}`],
     ['total addresses', countLabel(netCount(net))],
     ['prefix length', `/${data.prefix} (${data.hostBits} host bits)`],
   ];

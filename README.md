@@ -44,9 +44,12 @@ cidr <command> [args] [flags]
 | Flag | Meaning |
 | --- | --- |
 | `--json` | Machine-readable output |
-| `--no-color` | Never emit ANSI colour (also honours `NO_COLOR`; colour is off when piped) |
+| `--no-color`, `--no-colour` | Never emit ANSI colour (also honours `NO_COLOR`; colour is off when piped) |
+| `--color`, `--colour` | Force ANSI colour even when output is piped |
 | `--expand` | Also print every address in each block |
 | `--expand-limit <n>` | Refuse to expand more than `n` addresses (default `65536`) |
+| `--new-prefix <n>` | New prefix length for `split`, instead of the positional argument |
+| `--prefix <n>` | Prefix length for `supernet`, instead of the positional argument |
 | `-h`, `--help` | Usage |
 | `-v`, `--version` | Version |
 
@@ -340,12 +343,19 @@ exactly the addresses given — no more, no fewer. Adding a block that lies
 node --test
 ```
 
-The suite covers IPv4 `/31` and `/32`, `/0` and the full default routes in both
-families, IPv6 `/128`, the split of a `/24` into four `/26`s, differences that
-yield 1, 2, 3 and 4 blocks, normalisation of one IPv6 address written three
-ways, and property tests over random blocks — including that summarising every
-address of a `/24` returns that `/24`, and that splitting a block in half and
-diffing reassembles it.
+The suite covers IPv4 `/31` and `/32` and their IPv6 counterparts `/127` and
+`/128` — including the RFC 3021 rule that a `/31` keeps both its addresses
+rather than dropping the endpoints — plus `/0` and the full default routes in
+both families, IPv6 `/128`, the split of a `/24` into four `/26`s, differences
+that yield 1, 2, 3 and 4 blocks, normalisation of one IPv6 address written
+three ways, and property tests over random blocks — including that summarising
+every address of a `/24` returns that `/24`, and that splitting a block in half
+and diffing reassembles it.
+
+`test/flag-contract.test.js` additionally pins the parser against its own help:
+every flag the parser accepts must be documented in `--help`, and every flag
+`--help` names must parse. A working flag that nobody can discover is the same
+class of defect as an invented one.
 
 The arithmetic is additionally cross-checked against Python's `ipaddress`, an
 independent implementation written by different people for a different purpose:
