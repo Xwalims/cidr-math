@@ -347,10 +347,28 @@ ways, and property tests over random blocks — including that summarising every
 address of a `/24` returns that `/24`, and that splitting a block in half and
 diffing reassembles it.
 
-The arithmetic was additionally cross-checked against an independent
-implementation (Python's `ipaddress`) over 800+ randomised IPv4 and IPv6 cases;
-the two agreed on all of them. That harness is a development tool and is not
-part of the shipped package.
+The arithmetic is additionally cross-checked against Python's `ipaddress`, an
+independent implementation written by different people for a different purpose:
+
+```console
+$ python3 scripts/crosscheck.py
+crosscheck: 900/900 cases agree with python ipaddress (seed=20261003; ...)
+```
+
+Every expectation elsewhere in this suite comes from the code under test, so a
+symmetric bug would satisfy them all. Agreement with a second implementation is
+what makes this evidence rather than self-consistency. The check compares
+numbers, not text, because Python writes the IPv4-mapped form as
+`::ffff:102:304` where RFC 5952 canonical text is `::ffff:1.2.3.4`.
+
+**What the cross-check does not cover.** It generates only valid inputs and
+compares only arithmetic results, so it says nothing about input rejection
+(leading zeros in an octet, a double slash, a prefix out of range), nothing
+about RFC 5952 formatting, and nothing about the invariants Python cannot
+express at all — a mixed-family `intersect` must be `null`, which is a
+`TypeError` on the Python side. `node --test` owns all of that. The harness is a
+development tool: it needs Python, so it is not in the published package and not
+part of `npm test`.
 
 ## Licence
 
