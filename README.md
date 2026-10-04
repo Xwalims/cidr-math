@@ -47,7 +47,8 @@ cidr <command> [args] [flags]
 | `--no-color`, `--no-colour` | Never emit ANSI colour (also honours `NO_COLOR`; colour is off when piped) |
 | `--color`, `--colour` | Force ANSI colour even when output is piped |
 | `--expand` | Also print every address in each block |
-| `--expand-limit <n>` | Refuse to expand more than `n` addresses (default `65536`) |
+| `--expand-limit <n>` | Refuse to expand more than `n` addresses, in any one block or across all of them (default `65536`) |
+| `--max-blocks <n>` | Refuse a `split` that would produce more than `n` blocks (default `65536`) |
 | `--new-prefix <n>` | New prefix length for `split`, instead of the positional argument |
 | `--prefix <n>` | Prefix length for `supernet`, instead of the positional argument |
 | `-h`, `--help` | Usage |
@@ -60,7 +61,7 @@ cidr <command> [args] [flags]
 | `0` | Success |
 | `1` | A `contains` check was false |
 | `2` | Usage or I/O error |
-| `3` | `--expand` would exceed `--expand-limit` |
+| `3` | `--expand` would exceed `--expand-limit`, or a split exceeds `--max-blocks` |
 
 `contains` uses exit codes so it works directly in shell conditionals:
 
@@ -190,7 +191,7 @@ $ cidr supernet 10.1.2.3/24 16
 
 ### --expand
 
-Listing every address is refused once the block is larger than the limit, so
+Listing every address is refused once a block is larger than the limit, so
 `0.0.0.0/0` and `::/0` can never be materialised by accident:
 
 ```sh
@@ -213,6 +214,65 @@ cidr: refusing to expand 10.0.0.0/8: it holds 16777216 addresses, above the --ex
 $ echo $?
 3
 ```
+
+The limit is a **total**, not a per-block allowance. A per-block check alone
+is not a budget: splitting a `/8` into `/24`s gives 65536 blocks of 256
+addresses, every one of them under a limit of 256, for 16 777 216 addresses
+printed. Both halves are enforced, so a limit of 300 clears each block
+individually and still refuses on the sum:
+
+```sh
+$ cidr split 10.0.0.0/8 24 --expand --expand-limit 300
+cidr: refusing to expand 10.0.0.0/8 into /24: the blocks hold 512+ addresses, above the --expand-limit of 300 in total
+$ echo $?
+3
+```
+
+Every command that prints addresses is covered — `info`, `split`, `summarise`,
+`diff`, `supernet` and `sort` all refuse rather than start printing.
+
+### --max-blocks
+
+`split` builds one record per subnet, so the *count* has to be bounded before
+the list exists. This is a separate limit from `--expand-limit` because the
+cost here is the list, not the printing: `cidr split 10.0.0.0/0 32` dies in the
+allocator even with no `--expand` at all. The count is pure prefix arithmetic,
+so the refusal is instant and nothing is enumerated:
+
+```sh
+$ cidr split 0.0.0.0/0 32
+cidr: refusing to split 0.0.0.0/0 into /32: that is 4294967296 blocks, above the maximum of 65536
+$ echo $?
+3
+
+$ cidr split 0.0.0.0/0 16 | head -1
+0.0.0.0/0 -> 65536 x /16
+```
+
+Raise it when you really do want a longer list:
+
+```sh
+$ cidr split 10.0.0.0/8 25 --max-blocks 200000 --json
+{
+  "input": "10.0.0.0/8",
+  "source": "10.0.0.0/8",
+  "newPrefix": 25,
+  "count": 131072,
+  "subnets": [
+    "10.0.0.0/25",
+    "10.0.0.128/25",
+    ...
+```
+
+### Pipelines
+
+Output that outruns the reader is not an error. `cidr split 10.0.0.0/8 24 |
+head -1` closes the pipe as soon as `head` has its line; the CLI exits quietly
+instead of printing a stack trace, the way a UNIX filter does.
+
+Errors still report themselves: a bad CIDR or a refused expansion writes to
+stderr and keeps its exit code (`2` and `3` respectively) regardless of what
+happens to stdout.
 
 ## Library
 

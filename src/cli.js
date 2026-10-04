@@ -34,6 +34,7 @@ const { sortCidrs } = require('./sort.js');
 /** Single source of truth for every tunable default. */
 const DEFAULTS = Object.freeze({
   expandLimit: 65536n,
+  maxBlocks: 65536n,
 });
 
 const EXIT = Object.freeze({
@@ -61,7 +62,10 @@ Flags:
   --no-color, --no-colour   Never emit ANSI colour
   --color, --colour         Force ANSI colour even when output is piped
   --expand               Also print every address in each block
-  --expand-limit <n>     Refuse to expand more than <n> addresses (default ${DEFAULTS.expandLimit})
+  --expand-limit <n>     Refuse to expand more than <n> addresses in total,
+                         or in any single block (default ${DEFAULTS.expandLimit})
+  --max-blocks <n>       Refuse a split producing more than <n> blocks
+                         (default ${DEFAULTS.maxBlocks})
   --new-prefix <n>       New prefix length for "split" (alternative to the
                          positional argument)
   --prefix <n>           Prefix length for "supernet" (alternative to the
@@ -73,7 +77,7 @@ Exit codes:
   0  success
   1  a "contains" check was false
   2  usage or I/O error
-  3  --expand would exceed the limit
+  3  --expand would exceed the limit, or the split is too large
 
 Examples:
   cidr info 10.0.0.0/24
@@ -94,6 +98,30 @@ class LimitError extends Error {
     super(message);
     this.name = 'LimitError';
   }
+}
+
+/**
+ * Die quietly when stdout closes early.
+ *
+ * `cidr split 10.0.0.0/8 24 | head -1` is an ordinary thing to type, and it
+ * used to print a sixteen-line Node stack trace and exit 1: once `head` has
+ * what it wants it closes the pipe, the write fails with EPIPE, and an
+ * unhandled 'error' event on the socket takes the process down. The exit
+ * status was 1 even when the work had succeeded, and the output was a crash
+ * report in the middle of a pipeline.
+ *
+ * Nothing here converts a failure into a success. A closed stdout means the
+ * reader is gone and there is nowhere left to report to, so the process exits
+ * the way a UNIX filter does when its output is closed. Errors raised while
+ * still able to write -- a usage error, a refused expansion -- keep their own
+ * messages and their own exit codes, because those are written before stdout
+ * matters or to stderr.
+ */
+function exitOnBrokenPipe() {
+  process.stdout.on('error', (error) => {
+    if (error && error.code === 'EPIPE') process.exit(0);
+    throw error;
+  });
 }
 
 // ---------------------------------------------------------------- formatting
@@ -257,6 +285,10 @@ function renderBlocks(nets, options, headings = null) {
   return { lines };
 }
 
+/**
+ * The per-block half of the --expand guard: refuse one block that is itself
+ * larger than the limit. Every command that prints addresses calls this.
+ */
 function expandGuard(net, options) {
   const size = netCount(net);
   if (size > options.expandLimit) {
@@ -266,6 +298,31 @@ function expandGuard(net, options) {
     );
   }
   return size;
+}
+
+/**
+ * The per-command half: sum the addresses across every block and refuse once
+ * the total passes the limit.
+ *
+ * A per-block limit alone is not a budget. `split 10.0.0.0/8 24
+ * --expand-limit 256` printed 16 777 216 addresses: 65536 blocks of 256, each
+ * one individually under the limit, for a total 256x over budget. The flag
+ * table promises "Refuse to expand more than <n> addresses", which is a
+ * total, so the sum is what gets checked. Summing stops as soon as the limit
+ * is passed, so the refusal does not depend on the list being short.
+ */
+function expandTotalGuard(nets, options, source) {
+  let total = 0n;
+  for (const net of nets) {
+    total += netCount(net);
+    if (total > options.expandLimit) {
+      throw new LimitError(
+        `refusing to expand ${source}: the blocks hold ${total}+ addresses, ` +
+          `above the --expand-limit of ${options.expandLimit} in total`
+      );
+    }
+  }
+  return total;
 }
 
 // ------------------------------------------------------------------ commands
@@ -325,8 +382,24 @@ function commandSplit(positional, options, flags) {
   }
   const net = parseCidr(input);
   const newPrefix = parsePrefixArgument(String(rawPrefix), 'new prefix length');
+
+  // subnets() materialises one record per child, so the COUNT has to be
+  // bounded before the call. `split 0.0.0.0/0 32` is 2^32 records: not a slow
+  // answer, an out-of-memory abort. The count is pure prefix arithmetic, so
+  // this costs nothing and refuses instead of dying.
+  const wanted = 1n << BigInt(newPrefix - net.prefix);
+  if (wanted > options.maxBlocks) {
+    throw new LimitError(
+      `refusing to split ${net.text} into /${newPrefix}: that is ${wanted} blocks, ` +
+        `above the maximum of ${options.maxBlocks}`
+    );
+  }
+
   const nets = subnets(net, newPrefix);
-  if (options.expand) for (const child of nets) expandGuard(child, options);
+  if (options.expand) {
+    for (const child of nets) expandGuard(child, options);
+    expandTotalGuard(nets, options, `${net.text} into /${newPrefix}`);
+  }
   if (options.json) {
     return {
       lines: [
@@ -356,7 +429,10 @@ function commandSummarise(positional, options) {
   const entries = collectEntries(positional, options);
   const texts = summariseTexts(entries);
   const nets = texts.map((text) => parseCidr(text));
-  if (options.expand) for (const net of nets) expandGuard(net, options);
+  if (options.expand) {
+    for (const net of nets) expandGuard(net, options);
+    expandTotalGuard(nets, options, `${entries.length} entries`);
+  }
   if (options.json) {
     return {
       lines: [
@@ -416,7 +492,10 @@ function commandDiff(positional, options) {
   const [aText, bText] = positional;
   const a = parseCidr(aText);
   const nets = difference(a, parseCidr(bText));
-  if (options.expand) for (const net of nets) expandGuard(net, options);
+  if (options.expand) {
+    for (const net of nets) expandGuard(net, options);
+    expandTotalGuard(nets, options, `${a.text} minus ${parseCidr(bText).text}`);
+  }
   if (options.json) {
     return {
       lines: [
@@ -439,10 +518,18 @@ function commandDiff(positional, options) {
 function commandSort(positional, options) {
   const entries = collectEntries(positional, options);
   const texts = sortCidrs(entries);
+  // sort was the one command that printed addresses with NO guard at all:
+  // `sort 0.0.0.0/0 --expand` walked 2^32 addresses and was killed by the
+  // allocator. Guarded like every other --expand path.
+  const nets = texts.map((text) => parseCidr(text));
+  if (options.expand) {
+    for (const net of nets) expandGuard(net, options);
+    expandTotalGuard(nets, options, `${entries.length} entries`);
+  }
   if (options.json) {
     return { lines: [JSON.stringify({ input: entries, sorted: texts }, null, 2)] };
   }
-  return { lines: renderBlocks(texts.map((text) => parseCidr(text)), options).lines };
+  return { lines: renderBlocks(nets, options).lines };
 }
 
 function commandSupernet(positional, options, flags) {
@@ -478,6 +565,7 @@ function parseArgs(argv) {
   const flags = {};
   const positional = [];
   let expandLimit = DEFAULTS.expandLimit;
+  let maxBlocks = DEFAULTS.maxBlocks;
   let json = false;
   let colorRequested = true;
   let expand = false;
@@ -488,6 +576,13 @@ function parseArgs(argv) {
       throw new UsageError(`${token} expects a non-negative integer, got "${raw}"`);
     }
     expandLimit = BigInt(raw);
+  };
+
+  const setMaxBlocks = (raw, token) => {
+    if (!/^\d{1,20}$/.test(raw)) {
+      throw new UsageError(`${token} expects a non-negative integer, got "${raw}"`);
+    }
+    maxBlocks = BigInt(raw);
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -524,6 +619,9 @@ function parseArgs(argv) {
       case '--expand-limit':
         setLimit(nextValue(), name);
         break;
+      case '--max-blocks':
+        setMaxBlocks(nextValue(), name);
+        break;
       case '--new-prefix':
         flags.newPrefix = nextValue();
         break;
@@ -556,12 +654,14 @@ function parseArgs(argv) {
       color: useColor(colorRequested),
       expand,
       expandLimit,
+      maxBlocks,
     },
   };
 }
 
 /** @returns {number} process exit code. */
 function main(argv) {
+  exitOnBrokenPipe();
   let parsed;
   try {
     parsed = parseArgs(argv);
@@ -631,6 +731,9 @@ module.exports = {
   USAGE,
   collectEntries,
   describeCount,
+  expandGuard,
+  expandTotalGuard,
+  exitOnBrokenPipe,
   main,
   netToJson,
   parseArgs,

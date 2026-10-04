@@ -410,3 +410,210 @@ test('the usual rule still drops base and last for a /30', () => {
   assert.equal(data.usableLast, '10.0.0.2');
   assert.equal(data.usableCount, '2');
 });
+
+// ---------------------------------------------------------------------------
+// Runaway guards.
+//
+// Three real bugs, all of the same shape: a safety limit that exists in the
+// documentation but is not enforced on every path, so a plausible command
+// line kills the process instead of answering. Each test below FAILS against
+// the unguarded code -- sort --expand had no guard at all, the expand limit
+// was applied per block instead of to the total, and split built the whole
+// child list before anything counted it.
+// ---------------------------------------------------------------------------
+
+test('sort --expand honours --expand-limit, which it used to ignore entirely', () => {
+  const result = run(['sort', '10.0.0.0/30', '--expand', '--expand-limit', '1']);
+  assert.equal(result.status, 3, 'sort must refuse just like info does');
+  assert.match(result.stderr, /refusing to expand/);
+  assert.equal(result.stdout, '', 'a refused command must print nothing');
+});
+
+test('sort --expand still prints addresses when the block fits the limit', () => {
+  const result = run(['sort', '10.0.0.0/30', '--expand', '--expand-limit', '4']);
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /10\.0\.0\.0 167772160/);
+  assert.match(result.stdout, /10\.0\.0\.3 167772163/);
+});
+
+test('the whole address space cannot be expanded by any command', () => {
+  // Every one of these used to either walk 2^32 addresses or build 2^32
+  // records, and die in the allocator. Each must now exit 3 with a message.
+  const cases = [
+    ['info', '0.0.0.0/0'],
+    ['info', '::/0'],
+    ['sort', '0.0.0.0/0'],
+    ['summarise', '0.0.0.0/0'],
+    ['supernet', '10.0.0.0/8', '0'],
+  ];
+  for (const args of cases) {
+    const result = run([...args, '--expand']);
+    assert.equal(result.status, 3, `${args.join(' ')} --expand should refuse`);
+    assert.match(result.stderr, /refusing to expand/, `${args.join(' ')} should explain`);
+  }
+});
+
+test('--expand-limit applies to the TOTAL, not to each block in turn', () => {
+  // 10.0.0.0/24 into /26 is four blocks of 64 addresses: every block is under
+  // a limit of 128, but the command prints 256 addresses. Per block the answer
+  // is "yes", in total it is 2x over budget, and the flag table promises a
+  // total.
+  const result = run(['split', '10.0.0.0/24', '26', '--expand', '--expand-limit', '128']);
+  assert.equal(result.status, 3);
+  assert.match(result.stderr, /in total/);
+
+  // Raise the limit to the exact total and it must go through.
+  const ok = run(['split', '10.0.0.0/24', '26', '--expand', '--expand-limit', '256']);
+  assert.equal(ok.status, 0);
+  // A heading, then each block's own line, then its addresses.
+  assert.equal(lines(ok.stdout).length, 1 + 4 + 4 * 64);
+});
+
+test('the total guard still lets a big set through when each block is small', () => {
+  // 10.0.0.0/24 into /28 is sixteen blocks of sixteen addresses: 256 in total,
+  // comfortably under the default 65536. A guard that counted blocks instead
+  // of addresses, or that capped the block count here, would refuse it.
+  const result = run(['split', '10.0.0.0/24', '28', '--expand']);
+  assert.equal(result.status, 0);
+  assert.equal(lines(result.stdout).length, 1 + 16 + 16 * 16);
+});
+
+test('summarise --expand counts the total across its blocks too', () => {
+  // Two adjacent /25s collapse to one /24 (256 addresses). At a limit of 128
+  // the single result block is itself too big, so this is the per-block guard;
+  // what is asserted here is that summarise runs it at all.
+  const result = run(['summarise', '10.0.0.0/25', '10.0.0.128/25', '--expand', '--expand-limit', '128']);
+  assert.equal(result.status, 3);
+});
+
+test('diff --expand counts the total across the pieces it kept', () => {
+  // 10.0.0.0/22 minus 10.0.1.128/25 keeps three blocks -- 10.0.0.0/24,
+  // 10.0.1.0/25 and 10.0.2.0/23 -- for 896 addresses in total. The largest
+  // piece is 512, so a limit of 600 clears every block and still refuses: the
+  // refusal can only have come from the sum.
+  const args = ['diff', '10.0.0.0/22', '10.0.1.128/25', '--expand'];
+  const overTotal = run([...args, '--expand-limit', '600']);
+  assert.equal(overTotal.status, 3, '600 clears every block but not the total of 896');
+  assert.match(overTotal.stderr, /in total/);
+
+  // The exact total passes; one address less does not.
+  assert.equal(run([...args, '--expand-limit', '896']).status, 0);
+  assert.match(run([...args, '--expand-limit', '895']).stderr, /in total/);
+});
+
+test('a split too large to hold is refused before the list is built', () => {
+  // 0.0.0.0/0 into /32 is 4294967296 child records. This is not a slow
+  // answer, it is an out-of-memory abort, and it happens with or without
+  // --expand because the cost is the list, not the printing.
+  for (const args of [['split', '0.0.0.0/0', '32'], ['split', '::/0', '128']]) {
+    const result = run(args);
+    assert.equal(result.status, 3, `${args.join(' ')} should refuse`);
+    assert.match(result.stderr, /refusing to split/);
+    assert.match(result.stderr, /above the maximum of/);
+  }
+});
+
+test('the block-count refusal is pure prefix arithmetic, so it is instant', () => {
+  const start = Date.now();
+  const result = run(['split', '10.0.0.0/0', '30']);
+  const elapsed = Date.now() - start;
+  assert.equal(result.status, 3);
+  // 2^30 blocks. Counting them costs nothing; a correct refusal must not
+  // enumerate them, so this stays far below anything that materialises a list.
+  assert.ok(elapsed < 5000, `refusal took ${elapsed}ms, which suggests it enumerated the blocks`);
+});
+
+test('--max-blocks tunes the split ceiling and defaults to 65536', () => {
+  const { DEFAULTS } = require('../src/cli.js');
+  assert.equal(DEFAULTS.maxBlocks, 65536n);
+
+  // The boundary is what matters: at the ceiling a split runs, one block below
+  // it refuses. 10.0.0.0/24 into /28 is sixteen blocks, so 16 is the ceiling
+  // and 15 is not -- which pins "over" as strictly-greater.
+  assert.equal(run(['split', '10.0.0.0/24', '28', '--max-blocks', '16']).status, 0);
+  const refused = run(['split', '10.0.0.0/24', '28', '--max-blocks', '15']);
+  assert.equal(refused.status, 3);
+  assert.match(refused.stderr, /refusing to split/);
+  // The message names the ceiling that is actually in force, so a flag that
+  // parsed but did not reach the guard could not pass this.
+  assert.match(refused.stderr, /above the maximum of 15/);
+
+  // The default is in force on a split no flag mentions, and its size is
+  // reported rather than inferred. 0.0.0.0/0 into /32 is 2^32 blocks, so this
+  // names the default without materialising anything.
+  const byDefault = run(['split', '0.0.0.0/0', '32']);
+  assert.equal(byDefault.status, 3);
+  assert.match(byDefault.stderr, /above the maximum of 65536/);
+
+  // And an ordinary split still runs untouched under the default.
+  assert.equal(run(['split', '10.0.0.0/24', '28']).status, 0);
+});
+
+test('--max-blocks rejects junk the same way --expand-limit does', () => {
+  assert.equal(run(['split', '10.0.0.0/8', '16', '--max-blocks', 'lots']).status, 2);
+  assert.equal(run(['split', '10.0.0.0/8', '16', '--max-blocks']).status, 2);
+  assert.equal(run(['split', '10.0.0.0/8', '16', '--max-blocks=-4']).status, 2);
+});
+
+test('--max-blocks does not affect commands that do not build a list', () => {
+  // The ceiling is about materialising block lists, not about output size:
+  // info prints a fixed number of lines however low the ceiling goes.
+  assert.equal(run(['info', '10.0.0.0/8', '--max-blocks', '1']).status, 0);
+  assert.equal(run(['contains', '10.0.0.0/8', '10.1.0.0/16', '--max-blocks', '1']).status, 0);
+  assert.equal(run(['supernet', '10.1.2.3/24', '16', '--max-blocks', '1']).status, 0);
+});
+
+test('a closed stdout does not produce a stack trace', () => {
+  // `cidr split ... | head -1` closes the pipe once head has its line. The
+  // write then fails with EPIPE, and an unhandled 'error' event used to print
+  // a sixteen-line Node crash report into the middle of a pipeline and exit 1
+  // even though the work had succeeded.
+  const piped = spawnSync(
+    '/bin/sh',
+    ['-c', `"${process.execPath}" "${BIN}" split 10.0.0.0/8 24 | head -1`],
+    { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }
+  );
+  // The reader's output is the only thing on stdout.
+  assert.equal(piped.stdout, '10.0.0.0/8 -> 65536 x /24\n');
+  // The crash report went to stderr; there must be nothing there now.
+  assert.equal(piped.stderr, '', `stderr should be empty, got: ${piped.stderr.slice(0, 200)}`);
+  assert.doesNotMatch(piped.stderr, /EPIPE/);
+});
+
+test('a closed stdout on --expand output is quiet too', () => {
+  // The same failure through the expanding path: 4096 addresses is far more
+  // than one pipe buffer, so head closes the pipe mid-write.
+  const piped = spawnSync(
+    '/bin/sh',
+    ['-c', `"${process.execPath}" "${BIN}" info 10.0.0.0/16 --expand | head -2`],
+    { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }
+  );
+  assert.equal(piped.stderr, '', `stderr should be empty, got: ${piped.stderr.slice(0, 200)}`);
+});
+
+test('a broken pipe does not mask a real error', () => {
+  // The guard has to stay narrow: a usage error still exits 2 with its message
+  // even when the output is a closed pipe, because it is written to stderr
+  // before stdout is involved at all.
+  const piped = spawnSync(
+    '/bin/sh',
+    ['-c', `"${process.execPath}" "${BIN}" info 10.0.0.256/24 | head -1`],
+    { encoding: 'utf8' }
+  );
+  assert.match(piped.stderr, /out of range 0-255/);
+  assert.doesNotMatch(piped.stderr, /EPIPE/);
+});
+
+test('a broken pipe does not turn a refusal into a success', () => {
+  // --expand refuses and exits 3 before writing any address, so the pipe being
+  // closed cannot change that verdict.
+  const refused = run(['info', '10.0.0.0/8', '--expand']);
+  assert.equal(refused.status, 3);
+
+  const piped = spawnSync(
+    '/bin/sh',
+    ['-c', `"${process.execPath}" "${BIN}" info 10.0.0.0/8 --expand | head -1; exit \${PIPESTATUS[0]:-$?}`],
+    { encoding: 'utf8' }
+  );
+  assert.match(piped.stderr, /refusing to expand/);
+});
