@@ -515,3 +515,67 @@ test('summarise output is minimal: no two output blocks can be merged', () => {
   // Summarising the output again is a no-op.
   assert.deepEqual(summariseTexts(output), output);
 });
+// ---------------------------------------------------------------------------
+// Zone identifiers are part of an address's identity (RFC 4007 section 3.2:
+// "two different physical links may each contain a node with the link-local
+// address fe80::1"). Blocks on different interfaces share a numeric range but
+// no addresses, so they must never be merged, intersected or subtracted as if
+// they did. These came out of a differential run against Python's ipaddress.
+// ---------------------------------------------------------------------------
+
+test('blocks in different zones never collapse into one', () => {
+  // Both halves of fe80::/63 are present, but on different links, so the
+  // result is two /64s - not one /63 stamped with the first zone seen.
+  assert.deepEqual(
+    summariseTexts(['fe80::/64%eth0', 'fe80:0:0:1::/64%eth1']),
+    ['fe80::%eth0/64', 'fe80:0:0:1::%eth1/64']
+  );
+});
+
+test('a zoned block does not merge with an unzoned one', () => {
+  assert.deepEqual(
+    summariseTexts(['fe80::/64%eth0', 'fe80:0:0:1::/64']),
+    ['fe80:0:0:1::/64', 'fe80::%eth0/64']
+  );
+});
+
+test('blocks sharing a zone still collapse', () => {
+  assert.deepEqual(
+    summariseTexts(['fe80::/64%eth0', 'fe80:0:0:1::/64%eth0']),
+    ['fe80::%eth0/63']
+  );
+});
+
+test('blocks in different zones are disjoint', () => {
+  assert.equal(intersect('fe80::/64%eth0', 'fe80::/64%eth1'), null);
+  assert.equal(overlaps('fe80::/64%eth0', 'fe80::/64%eth1'), false);
+  assert.equal(contains('fe80::/63%eth0', 'fe80::/64%eth1'), false);
+  assert.equal(containsAddress('fe80::/63%eth0', 'fe80::1%eth1'), false);
+});
+
+test('an unzoned block intersects and contains any zone', () => {
+  // No zone given means the statement holds in every zone.
+  const hit = intersect('fe80::/63', 'fe80::/64%eth0');
+  assert.equal(hit.text, 'fe80::%eth0/64');
+  assert.equal(hit.zone, 'eth0');
+  assert.equal(contains('fe80::/63', 'fe80::/64%eth0'), true);
+  assert.equal(containsAddress('fe80::/63', 'fe80::1%eth0'), true);
+});
+
+test('subtracting a hole in another zone removes nothing', () => {
+  assert.deepEqual(
+    differenceTexts('fe80::/63%eth0', 'fe80::/64%eth1'),
+    ['fe80::%eth0/63']
+  );
+  // The same hole on the same interface does remove.
+  assert.deepEqual(
+    differenceTexts('fe80::/63%eth0', 'fe80::/64%eth0'),
+    ['fe80:0:0:1::%eth0/64']
+  );
+});
+
+test('zone is a total sort tie-break', () => {
+  const sorted = summariseTexts(['fe80:0:0:1::/64%eth1', 'fe80::/64%eth0']);
+  assert.deepEqual(sorted, ['fe80::%eth0/64', 'fe80:0:0:1::%eth1/64']);
+  assert.deepEqual(summariseTexts(sorted), sorted);
+});

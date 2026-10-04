@@ -13,19 +13,26 @@ const { asNet } = require('./ipset.js');
 
 /**
  * Comparator over parsed network records: IPv4 before IPv6, then by base
- * address, then by prefix (longer prefix first) as a tie-break.
+ * address, then by prefix (longer prefix first) as a tie-break. Zone is the
+ * last tie-break so the order is total: two blocks in different zones are
+ * different blocks even when family, base and prefix all agree.
  */
 function compareNets(a, b) {
   if (a.family !== b.family) return a.family - b.family;
   if (a.base !== b.base) return a.base < b.base ? -1 : 1;
-  return b.prefix - a.prefix;
+  if (a.prefix !== b.prefix) return b.prefix - a.prefix;
+  const za = a.zone === null ? '' : a.zone;
+  const zb = b.zone === null ? '' : b.zone;
+  return za < zb ? -1 : za > zb ? 1 : 0;
 }
 
 /** Comparator over bare addresses (from parseAddress). */
 function compareAddresses(a, b) {
   if (a.family !== b.family) return a.family - b.family;
   if (a.value !== b.value) return a.value < b.value ? -1 : 1;
-  return 0;
+  const za = a.zone === null ? '' : a.zone;
+  const zb = b.zone === null ? '' : b.zone;
+  return za < zb ? -1 : za > zb ? 1 : 0;
 }
 
 /**

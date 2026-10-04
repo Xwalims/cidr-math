@@ -320,6 +320,36 @@ block without you having to compare twice.
   tools emit; both normalise to the zone sitting on the address
 * A bare address with no prefix, which defaults to a host route
 
+### Zones are part of an address's identity
+
+RFC 4007 §3.2: "two different physical links may each contain a node with the
+link-local address `fe80::1`", and §6: a node "requires an internal means to
+identify to which zone a non-global address belongs". So `fe80::/64%eth0` and
+`fe80::/64%eth1` are **disjoint** sets of addresses that merely happen to share
+a numeric range.
+
+Every operation here respects that:
+
+```js
+summariseTexts(['fe80::/64%eth0', 'fe80:0:0:1::/64%eth1']);
+// ['fe80::%eth0/64', 'fe80:0:0:1::%eth1/64']  — two blocks, not one /63
+
+intersect('fe80::/64%eth0', 'fe80::/64%eth1');  // null
+contains('fe80::/63%eth0', 'fe80::/64%eth1');  // false
+differenceTexts('fe80::/63%eth0', 'fe80::/64%eth1');
+// ['fe80::%eth0/63'] — an eth1 hole removes nothing from an eth0 block
+```
+
+Two blocks in the **same** zone still collapse normally, and a block with **no**
+zone means the statement holds in every zone — so it merges with nothing
+specific but does contain, and is contained by, zoned blocks:
+
+```js
+summariseTexts(['fe80::/64%eth0', 'fe80:0:0:1::/64%eth0']);  // ['fe80::%eth0/63']
+intersect('fe80::/63', 'fe80::/64%eth0').text;               // 'fe80::%eth0/64'
+contains('fe80::/63', 'fe80::/64%eth0');                     // true
+```
+
 Equivalent spellings normalise to one canonical output (RFC 5952 for IPv6: the
 longest run of zero groups becomes `::`, ties broken leftmost):
 

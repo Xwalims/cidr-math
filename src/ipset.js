@@ -143,6 +143,36 @@ function mergeRanges(ranges) {
 }
 
 /**
+ * True when two zone identifiers denote the same zone.
+ *
+ * RFC 4007 makes the zone part of an address's identity: "two different
+ * physical links may each contain a node with the link-local address
+ * fe80::1" (section 3.2), and a node "requires an internal means to identify
+ * to which zone a non-global address belongs" (section 6). So fe80::/64%eth0
+ * and fe80::/64%eth1 are two disjoint sets of addresses, not two halves of
+ * one block that happens to share a numeric range.
+ *
+ * A null zone means "no zone given", i.e. the statement is about every zone.
+ * It therefore matches any zone, but - see summarise() - it never absorbs a
+ * zoned block, because doing so would widen a scoped set into a global one.
+ */
+function sameZone(a, b) {
+  return a === b;
+}
+
+/**
+ * Order zone identifiers for output: no zone first, then alphabetical.
+ * A Map keyed by zone iterates in insertion order, so summarise() sorts with
+ * this to keep its output a function of its input rather than of argument
+ * order.
+ */
+function zoneOrder(a, b) {
+  if (a === null) return b === null ? 0 : -1;
+  if (b === null) return 1;
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
  * Collapse networks/addresses into the minimal set of CIDR blocks covering
  * exactly the same addresses.
  *
@@ -150,27 +180,41 @@ function mergeRanges(ranges) {
  * 10.0.1.0/24 alone       -> 10.0.1.0/24
  *
  * Mixed families are summarised independently; IPv4 output comes first.
+ *
+ * Blocks are grouped by zone as well as by family, so a zoned block never
+ * merges with a different zone or with an unzoned one. Collapsing
+ * ["fe80::/64%eth0", "fe80:0:0:1::/64%eth1"] into a single "fe80::%eth0/63"
+ * would claim the second half of eth0 - addresses that were not in the input
+ * - and silently drop the eth1 half.
  */
 function summarise(entries) {
   const list = Array.isArray(entries) ? entries : [entries];
-  const byFamily = new Map();
+
+  // Family first, then zone, so output order stays deterministic and IPv4
+  // still comes before IPv6. Keyed by family then zone rather than a joined
+  // string, so no separator can collide with a zone name.
+  const groups = new Map();
   for (const entry of list) {
     const net = asNet(entry, 'entry');
-    if (!byFamily.has(net.family)) byFamily.set(net.family, []);
-    byFamily.get(net.family).push(net);
+    if (!groups.has(net.family)) groups.set(net.family, new Map());
+    const byZone = groups.get(net.family);
+    if (!byZone.has(net.zone)) byZone.set(net.zone, []);
+    byZone.get(net.zone).push(net);
   }
 
   const out = [];
   for (const family of [4, 6]) {
-    const nets = byFamily.get(family);
-    if (!nets) continue;
+    const byZone = groups.get(family);
+    if (!byZone) continue;
     const bits = family === 4 ? 32 : 128;
-    const zone = nets[0].zone;
-    const ranges = nets
-      .map((net) => ({ start: net.base, end: net.last }))
-      .sort((x, y) => (x.start < y.start ? -1 : x.start > y.start ? 1 : 0));
-    for (const range of mergeRanges(ranges)) {
-      out.push(...coverRange(range.start, range.end, bits, family, zone));
+    for (const zone of [...byZone.keys()].sort(zoneOrder)) {
+      const ranges = byZone
+        .get(zone)
+        .map((net) => ({ start: net.base, end: net.last }))
+        .sort((x, y) => (x.start < y.start ? -1 : x.start > y.start ? 1 : 0));
+      for (const range of mergeRanges(ranges)) {
+        out.push(...coverRange(range.start, range.end, bits, family, zone));
+      }
     }
   }
   return out;
@@ -196,11 +240,18 @@ function commonPrefixLength(a, b, bits) {
  * The common part of two networks, or null when they are disjoint.
  * Different families are disjoint, not an error: intersect("10.0.0.0/8",
  * "2001:db8::/32") === null.
+ *
+ * Blocks in different zones are also disjoint - they share no address - so
+ * intersect("fe80::/64%eth0", "fe80::/64%eth1") === null. An unzoned block is
+ * zone-agnostic and does intersect a zoned one, taking the zoned spelling.
  */
 function intersect(a, b) {
   const left = asNet(a, 'first network');
   const right = asNet(b, 'second network');
   if (left.family !== right.family) return null;
+  if (left.zone !== null && right.zone !== null && !sameZone(left.zone, right.zone)) {
+    return null;
+  }
   const start = left.base > right.base ? left.base : right.base;
   const end = left.last < right.last ? left.last : right.last;
   if (start > end) return null;
@@ -217,6 +268,9 @@ function contains(container, inner) {
   const outer = asNet(container, 'container');
   const probe = asNet(inner, 'inner network');
   if (outer.family !== probe.family) return false;
+  // A container scoped to a zone only contains blocks in that zone. An
+  // unzoned container is unscoped, so it contains any zone.
+  if (outer.zone !== null && !sameZone(outer.zone, probe.zone)) return false;
   return outer.base <= probe.base && outer.last >= probe.last;
 }
 
@@ -225,6 +279,7 @@ function containsAddress(container, address) {
   const outer = asNet(container, 'container');
   const probe = parseAddress(address);
   if (outer.family !== probe.family) return false;
+  if (outer.zone !== null && !sameZone(outer.zone, probe.zone)) return false;
   return outer.base <= probe.value && probe.value <= outer.last;
 }
 
@@ -246,6 +301,11 @@ function difference(a, b) {
   let pieces = [outer];
   for (const hole of others) {
     if (hole.family !== outer.family) continue;
+    // A hole in another zone removes nothing: those addresses are not in the
+    // outer block to begin with.
+    if (outer.zone !== null && hole.zone !== null && !sameZone(outer.zone, hole.zone)) {
+      continue;
+    }
     if (hole.last < outer.base || hole.base > outer.last) continue;
 
     const next = [];
@@ -331,4 +391,5 @@ module.exports = {
   // exported for internal composition and tests
   asNet,
   commonPrefixLength,
+  sameZone,
 };
