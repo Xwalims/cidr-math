@@ -574,6 +574,44 @@ test('subtracting a hole in another zone removes nothing', () => {
   );
 });
 
+test('subtracting from an UNZONED block only removes that zone', () => {
+  // The reverse direction of the test above, and the one that was wrong.
+  //
+  // An unzoned block is not "a block with no interface" -- per sameZone() it is
+  // the statement "these addresses, in every zone". So fe80::/64 minus
+  // fe80::/64%eth0 removes eth0's copy and leaves every OTHER zone's copy
+  // intact. Returning [] claims the unscoped block is now empty, which drops
+  // every address on every interface other than eth0.
+  assert.deepEqual(
+    differenceTexts('fe80::/64', 'fe80::/64%eth0'),
+    ['fe80::/64']
+  );
+  // A PARTIAL zoned hole cannot narrow an unzoned block either, and the
+  // reason is not an oversight. "Every zone" minus "eth0's lower half" is not
+  // expressible: the vocabulary has no block meaning "every zone except
+  // eth0". So the block is returned intact -- an over-approximation, which is
+  // the safe direction for a "what is still uncovered" question. Understating
+  // it (the old behaviour) was the dangerous one.
+  assert.deepEqual(
+    differenceTexts('fe80::/64', 'fe80::/65%eth0'),
+    ['fe80::/64']
+  );
+  // An unzoned hole still removes from an unzoned outer, exactly as before --
+  // subtracting a zone-agnostic statement from a zone-agnostic statement.
+  assert.deepEqual(
+    differenceTexts('fe80::/64', 'fe80::/64'),
+    []
+  );
+  // And a zoned hole in a DIFFERENT zone than an unzoned outer must not
+  // empty it either -- same reason, spelled the other way round.
+  assert.deepEqual(
+    differenceTexts('fe80::/63', 'fe80::/64%eth1'),
+    ['fe80::/63']
+  );
+  // IPv4 cannot carry a zone, so the unzoned path there is unaffected.
+  assert.deepEqual(differenceTexts('10.0.0.0/24', '10.0.0.0/25'), ['10.0.0.128/25']);
+});
+
 test('zone is a total sort tie-break', () => {
   const sorted = summariseTexts(['fe80:0:0:1::/64%eth1', 'fe80::/64%eth0']);
   assert.deepEqual(sorted, ['fe80::%eth0/64', 'fe80:0:0:1::%eth1/64']);

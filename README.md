@@ -350,6 +350,16 @@ intersect('fe80::/63', 'fe80::/64%eth0').text;               // 'fe80::%eth0/64'
 contains('fe80::/63', 'fe80::/64%eth0');                     // true
 ```
 
+The same rule governs `diff`, and an unscoped left-hand side keeps its
+addresses — a zone-specific hole cannot narrow a block that stands for every
+zone, so the answer is the over-approximation rather than an empty set:
+
+```js
+differenceTexts('fe80::/64', 'fe80::/64%eth0');  // ['fe80::/64'] — not []
+differenceTexts('fe80::/64%eth0', 'fe80::/64%eth0');  // [] — same zone, really empty
+differenceTexts('fe80::/64', 'fe80::/64');           // [] — both zone-agnostic
+```
+
 Equivalent spellings normalise to one canonical output (RFC 5952 for IPv6: the
 longest run of zero groups becomes `::`, ties broken leftmost):
 

@@ -303,6 +303,18 @@ function difference(a, b) {
     if (hole.family !== outer.family) continue;
     // A hole in another zone removes nothing: those addresses are not in the
     // outer block to begin with.
+    //
+    // An unzoned OUTER is the awkward direction, and the one that was wrong.
+    // Unzoned does not mean "no interface" -- see sameZone(): it means "in
+    // every zone". So fe80::/64 (no zone) minus fe80::/64%eth0 must keep the
+    // addresses: eth0's copy goes, every other zone's copy stays, and what is
+    // left is still the unscoped fe80::/64. Treating the block as if it were
+    // eth0's alone returned [] -- an empty answer that read as "fully
+    // subtracted" while silently dropping every address on every other link,
+    // which is exactly the claim a firewall diff gets pasted into a ticket.
+    //
+    // The remainder therefore keeps the outer's zone, never the hole's.
+    if (outer.zone === null && hole.zone !== null) continue;
     if (outer.zone !== null && hole.zone !== null && !sameZone(outer.zone, hole.zone)) {
       continue;
     }
